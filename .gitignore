@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+**/__pycache__/
+*.egg-info/
+**/*.egg-info/
+*.pyc
+.venv/
+venv/
+
+# Secrets
+.env
+.env.*
+*.env
+!.env.example
+
+# Sensitive — never commit
+app/prompts/
+app/private/
+
+# IDE
+.idea/
+.vscode/

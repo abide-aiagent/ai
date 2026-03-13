@@ -1,0 +1,25 @@
+[project]
+name = "abide-ai"
+version = "0.1.0"
+description = "ABIDE AI Agent Server - Meditation & Theology RAG"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "langchain>=0.3",
+    "langchain-google-genai>=2.0",
+    "langgraph>=0.4",
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
+    "redis>=5.0",
+    "httpx>=0.28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
