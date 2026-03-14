@@ -269,29 +269,35 @@ async def meditation_chat(req: MeditationChatRequest):
 @router.post("/meditation/start/sync", response_model=MeditationResponse)
 async def meditation_start_sync(req: MeditationStartRequest):
     """Start meditation session (sync response — for debugging)"""
-    await ensure_session_exists(
-        session_id=req.session_id,
-        verse_ref=req.verse_ref,
-    )
-    result = await start_meditation(
-        user_id=req.user_id,
-        session_id=req.session_id,
-        verse_ref=req.verse_ref,
-        verse_refs=req.verse_refs,
-        mood=req.mood or "",
-    )
-    await _save_state(req.session_id, result["state"])
+    try:
+        await ensure_session_exists(
+            session_id=req.session_id,
+            verse_ref=req.verse_ref,
+        )
+        result = await start_meditation(
+            user_id=req.user_id,
+            session_id=req.session_id,
+            verse_ref=req.verse_ref,
+            verse_refs=req.verse_refs,
+            mood=req.mood or "",
+        )
+        await _save_state(req.session_id, result["state"])
 
-    return MeditationResponse(
-        session_id=req.session_id,
-        content=result["content"],
-        thinking_log=result.get("thinking_log", []),
-        meditation_depth=result["meditation_depth"],
-        turn_count=result["turn_count"],
-        referenced_verses=result.get("referenced_verses", []),
-        is_final=result["is_final"],
-        meditation_note=result.get("meditation_note"),
-    )
+        return MeditationResponse(
+            session_id=req.session_id,
+            content=result["content"],
+            thinking_log=result.get("thinking_log", []),
+            meditation_depth=result["meditation_depth"],
+            turn_count=result["turn_count"],
+            referenced_verses=result.get("referenced_verses", []),
+            is_final=result["is_final"],
+            meditation_note=result.get("meditation_note"),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Meditation start sync error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="묵상 시작 중 오류가 발생했습니다.")
 
 
 @router.post("/meditation/chat/sync", response_model=MeditationResponse)
@@ -301,25 +307,31 @@ async def meditation_chat_sync(req: MeditationChatRequest):
     if not session_state:
         raise HTTPException(status_code=404, detail="Session not found.")
 
-    result = await continue_meditation(
-        session_state=session_state,
-        user_message=req.user_message,
-    )
-    await _save_state(req.session_id, result["state"])
+    try:
+        result = await continue_meditation(
+            session_state=session_state,
+            user_message=req.user_message,
+        )
+        await _save_state(req.session_id, result["state"])
 
-    if result["is_final"]:
-        await _remove_state(req.session_id)
+        if result["is_final"]:
+            await _remove_state(req.session_id)
 
-    return MeditationResponse(
-        session_id=req.session_id,
-        content=result["content"],
-        thinking_log=result.get("thinking_log", []),
-        meditation_depth=result["meditation_depth"],
-        turn_count=result["turn_count"],
-        referenced_verses=result.get("referenced_verses", []),
-        is_final=result["is_final"],
-        meditation_note=result.get("meditation_note"),
-    )
+        return MeditationResponse(
+            session_id=req.session_id,
+            content=result["content"],
+            thinking_log=result.get("thinking_log", []),
+            meditation_depth=result["meditation_depth"],
+            turn_count=result["turn_count"],
+            referenced_verses=result.get("referenced_verses", []),
+            is_final=result["is_final"],
+            meditation_note=result.get("meditation_note"),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Meditation chat sync error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="묵상 진행 중 오류가 발생했습니다.")
 
 
 # ══════════════════════════════════════════════
@@ -381,76 +393,110 @@ async def theology_search(req: AskRequest):
 @router.post("/deep-lens", response_model=DeepLensResponse)
 async def deep_lens_analyze(req: DeepLensRequest):
     """DeepLens deep analysis — cache-first, AI-generated on miss"""
+    try:
+        # Cache check
+        if not req.force_refresh:
+            try:
+                cached = await get_deep_lens_cache(req.verse_ref)
+            except Exception as e:
+                logger.warning(f"DeepLens cache read failed (proceeding without cache): {e}")
+                cached = None
 
-    # Cache check
-    if not req.force_refresh:
-        cached = await get_deep_lens_cache(req.verse_ref)
-        if cached:
-            return DeepLensResponse(
+            if cached:
+                return DeepLensResponse(
+                    verse_ref=req.verse_ref,
+                    context_guide=cached["context_guide"],
+                    interpretation=cached["interpretation"],
+                    application=cached["application"],
+                    cross_references=cached.get("cross_references") or [],
+                    cached=True,
+                )
+
+        # Fetch Bible verse text
+        verse_text = ""
+        try:
+            parts = req.verse_ref.split(":")
+            if len(parts) >= 4:
+                version, book, chapter, verse = parts[0], int(parts[1]), int(parts[2]), int(parts[3])
+                verse_text = await get_passage_text(version, book, chapter, verse)
+        except Exception as e:
+            logger.warning(f"Failed to fetch verse text for {req.verse_ref}: {e}")
+
+        # RAG search (has internal try-except, returns [] on failure)
+        rag_results = await search_theology(verse_text or req.verse_ref, limit=4)
+        rag_context = format_rag_context(rag_results)
+
+        # LLM analysis
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model=settings.llm_model,
+                temperature=0.5,
+                google_api_key=settings.gemini_api_key,
+            )
+            prompt = DEEP_LENS_PROMPT.format(
                 verse_ref=req.verse_ref,
-                context_guide=cached["context_guide"],
-                interpretation=cached["interpretation"],
-                application=cached["application"],
-                cross_references=cached.get("cross_references") or [],
-                cached=True,
+                verse_text=verse_text or "(본문 로딩 실패)",
+                rag_context=rag_context or "(참조 자료 없음)",
+            )
+            resp = await llm.ainvoke([SystemMessage(content=prompt)])
+            raw_content = resp.content
+        except Exception as e:
+            logger.error(f"DeepLens LLM call failed for {req.verse_ref}: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=503,
+                detail="AI 분석 서비스에 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
             )
 
-    # Fetch Bible verse text
-    verse_text = ""
-    try:
-        parts = req.verse_ref.split(":")
-        if len(parts) >= 4:
-            version, book, chapter, verse = parts[0], int(parts[1]), int(parts[2]), int(parts[3])
-            verse_text = await get_passage_text(version, book, chapter, verse)
+        # Parse LLM JSON response
+        try:
+            # Strip markdown code blocks if present
+            content = raw_content.strip()
+            if content.startswith("```"):
+                lines = content.split("\n")
+                content = "\n".join(
+                    line for line in lines
+                    if not line.strip().startswith("```")
+                )
+            result = json.loads(content)
+        except json.JSONDecodeError:
+            logger.warning(f"DeepLens JSON parse failed for {req.verse_ref}, using raw content")
+            result = {
+                "context_guide": raw_content,
+                "interpretation": "",
+                "application": "",
+                "cross_references": [],
+            }
+
+        # Cache save (non-critical — failure does not affect response)
+        try:
+            await save_deep_lens_cache(
+                verse_ref=req.verse_ref,
+                context_guide=result.get("context_guide", ""),
+                interpretation=result.get("interpretation", ""),
+                application=result.get("application", ""),
+                cross_references=result.get("cross_references"),
+            )
+        except Exception as e:
+            logger.warning(f"DeepLens cache save failed (non-critical): {e}")
+
+        return DeepLensResponse(
+            verse_ref=req.verse_ref,
+            verse_text=verse_text,
+            context_guide=result.get("context_guide", ""),
+            interpretation=result.get("interpretation", ""),
+            application=result.get("application", ""),
+            cross_references=result.get("cross_references", []),
+            cached=False,
+        )
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"Failed to fetch verse text: {e}")
-
-    # RAG search
-    rag_results = await search_theology(verse_text or req.verse_ref, limit=4)
-    rag_context = format_rag_context(rag_results)
-
-    # LLM analysis
-    llm = ChatGoogleGenerativeAI(
-        model=settings.llm_model,
-        temperature=0.5,
-        google_api_key=settings.gemini_api_key,
-    )
-
-    prompt = DEEP_LENS_PROMPT.format(
-        verse_ref=req.verse_ref,
-        verse_text=verse_text or "(본문 로딩 실패)",
-        rag_context=rag_context or "(참조 자료 없음)",
-    )
-
-    resp = await llm.ainvoke([SystemMessage(content=prompt)])
-    try:
-        result = json.loads(resp.content)
-    except json.JSONDecodeError:
-        result = {
-            "context_guide": resp.content,
-            "interpretation": "",
-            "application": "",
-            "cross_references": [],
-        }
-
-    # Cache save
-    await save_deep_lens_cache(
-        verse_ref=req.verse_ref,
-        context_guide=result.get("context_guide", ""),
-        interpretation=result.get("interpretation", ""),
-        application=result.get("application", ""),
-        cross_references=result.get("cross_references"),
-    )
-
-    return DeepLensResponse(
-        verse_ref=req.verse_ref,
-        verse_text=verse_text,
-        context_guide=result.get("context_guide", ""),
-        interpretation=result.get("interpretation", ""),
-        application=result.get("application", ""),
-        cross_references=result.get("cross_references", []),
-        cached=False,
-    )
+        logger.error(f"DeepLens unexpected error for {req.verse_ref}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="딥렌즈 분석 중 예상치 못한 오류가 발생했습니다.",
+        )
 
 
 # ══════════════════════════════════════════════
@@ -459,35 +505,39 @@ async def deep_lens_analyze(req: DeepLensRequest):
 @router.post("/compass/check-in", response_model=MoodCheckInResponse)
 async def mood_check_in(req: MoodCheckInRequest):
     """Mood check-in — returns mood-based verse recommendations"""
-    mood = req.mood.lower()
+    try:
+        mood = req.mood.lower()
 
-    # DB에서 먼저 조회, 실패 시 하드코딩 폴백
-    verses = await get_mood_verses_from_db(mood)
-    if not verses:
-        verses = await get_mood_verses_from_db("sad")  # fallback mood
-    if not verses:
-        verses = MOOD_VERSES.get(mood, MOOD_VERSES.get("sad", []))  # final fallback
+        # DB에서 먼저 조회, 실패 시 하드코딩 폴백
+        verses = await get_mood_verses_from_db(mood)
+        if not verses:
+            verses = await get_mood_verses_from_db("sad")  # fallback mood
+        if not verses:
+            verses = MOOD_VERSES.get(mood, MOOD_VERSES.get("sad", []))  # final fallback
 
-    mood_messages = {
-        "joy": "기쁜 날이네요! 주 안에서 함께 기뻐해요. 🎉",
-        "anxious": "하나님의 평안이 함께하시길 기도합니다. 🙏",
-        "angry": "마음이 격앙된 순간에도 하나님은 함께 하세요.",
-        "tired": "쉬어가도 괜찮아요. 하나님이 새 힘을 주실 거예요. 💚",
-        "grateful": "감사하는 마음, 정말 아름다워요! 🌿",
-        "sad": "슬플 때 하나님은 더 가까이 계세요. 위로가 함께하길 빕니다. 💙",
-    }
+        mood_messages = {
+            "joy": "기쁜 날이네요! 주 안에서 함께 기뻐해요. 🎉",
+            "anxious": "하나님의 평안이 함께하시길 기도합니다. 🙏",
+            "angry": "마음이 격앙된 순간에도 하나님은 함께 하세요.",
+            "tired": "쉬어가도 괜찮아요. 하나님이 새 힘을 주실 거예요. 💚",
+            "grateful": "감사하는 마음, 정말 아름다워요! 🌿",
+            "sad": "슬플 때 하나님은 더 가까이 계세요. 위로가 함께하길 빕니다. 💙",
+        }
 
-    return MoodCheckInResponse(
-        message=mood_messages.get(mood, "하나님의 은혜가 함께하시길 빕니다."),
-        recommended_verses=verses,
-    )
+        return MoodCheckInResponse(
+            message=mood_messages.get(mood, "하나님의 은혜가 함께하시길 빕니다."),
+            recommended_verses=verses,
+        )
+    except Exception as e:
+        logger.error(f"Compass check-in error (mood={req.mood}): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="감정 체크인 처리 중 오류가 발생했습니다.")
 
 # ══════════════════════════════════════════════
 # Report Classification (L6)
 # ══════════════════════════════════════════════
 @router.post("/classify-report", response_model=ReportClassifyResponse)
 async def classify_report(req: ReportClassifyRequest):
-    """Auto-classify user reports using LLM"""
+    """Auto-classify user reports using LLM (best-effort; returns safe default on failure)"""
     prompt = f"""
     다음 신고 내용을 분석하여 심각도(severity)와 권장 조치(suggested_action)를 분류하세요.
     신고 사유: {req.report_reason}
@@ -502,20 +552,19 @@ async def classify_report(req: ReportClassifyRequest):
     """
     try:
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model=settings.llm_model,
             temperature=0.0,
-            api_key=settings.gemini_api_key,
+            google_api_key=settings.gemini_api_key,
         )
-        msg = llm.invoke([HumanMessage(content=prompt)])
-        import json
-        
+        msg = await llm.ainvoke([HumanMessage(content=prompt)])
+
         # Parse JSON from markdown block if necessary
         content = msg.content
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0].strip()
         elif "```" in content:
             content = content.split("```")[1].strip()
-            
+
         data = json.loads(content)
         return ReportClassifyResponse(
             severity=data.get("severity", "medium"),
