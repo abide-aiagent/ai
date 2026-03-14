@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -45,18 +45,36 @@ async def lifespan(app: FastAPI):
         pass
 
 
+_PUBLIC_PATHS = {"/", "/api/v1/agent/health"}
+
+
 class InternalApiKeyMiddleware(BaseHTTPMiddleware):
     """Core 서버의 Internal API Key를 검증하는 미들웨어.
-    /api/v1/agent/* 경로에 대해 X-Internal-Key 헤더를 확인합니다.
+    모든 API 경로에 대해 X-Internal-Key 헤더를 확인합니다.
+    (AI 서버는 Core 서버에서만 접근 가능)
     """
 
     async def dispatch(self, request: Request, call_next):
-        # Health check와 root는 인증 불필요
         path = request.url.path
-        if path.startswith("/api/v1/agent"):
-            key = request.headers.get("X-Internal-Key", "")
-            if not settings.internal_api_key or key != settings.internal_api_key:
-                raise HTTPException(status_code=403, detail="Forbidden: Invalid internal API key")
+        # public paths skip key validation
+        if path in _PUBLIC_PATHS:
+            return await call_next(request)
+
+        if not settings.internal_api_key:
+            from fastapi.responses import JSONResponse
+            logger.error("INTERNAL_API_KEY not configured — rejecting all requests")
+            return JSONResponse(status_code=503, content={"detail": "Service misconfigured"})
+
+        key = request.headers.get("X-Internal-Key", "")
+        if key != settings.internal_api_key:
+            from fastapi.responses import JSONResponse
+            logger.warning(
+                "Rejected request to %s — invalid X-Internal-Key from %s",
+                path,
+                request.client.host if request.client else "unknown",
+            )
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized: invalid internal API key"})
+
         return await call_next(request)
 
 
