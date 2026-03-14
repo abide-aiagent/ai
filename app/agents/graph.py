@@ -193,8 +193,10 @@ async def continue_meditation(
     updated_state["messages"] = list(session_state.get("messages", [])) + [
         HumanMessage(content=user_message)
     ]
-    # Reset thinking_log (only collect logs for this turn)
+    # thinking_log은 _accumulate_list reducer로 자동 누적됨
+    # 이번 턴의 로그만 수집하기 위해 초기화
     updated_state["thinking_log"] = []
+    # last_executed_node는 이전 턴에서 설정된 값이 유지됨 (supervisor에서 참조)
 
     # Execute graph
     result = await meditation_graph.ainvoke(updated_state)

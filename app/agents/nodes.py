@@ -4,7 +4,14 @@
 Meditation Agent Node Implementations (LangGraph Nodes)
 
 7 nodes: Supervisor, Planner, Counselor, Observer, Scribe, ConfirmEnd, WrapUp
-Each node receives MeditationState and returns a partial state update.
+
+최적화 내역:
+- Counselor: MATE_SYSTEM_PROMPT + COUNSELOR_PROMPT 2개 → COUNSELOR_SYSTEM_PROMPT 1개로 통합
+  (scripture/emotion 중복 전달 제거, 플레이스홀더 미사용 버그 수정)
+- Planner: key_rag_insights 압축 필드 추출 → Counselor에는 전체 RAG 대신 핵심만 전달
+- ConfirmEnd/WrapUp: LLM 호출 제거 → 템플릿 기반으로 대체 (세션당 LLM 2회 절약)
+- Observer: 프롬프트 단축, 불필요한 HumanMessage 제거
+- 모든 노드에서 scripture_text 중복 전달 제거
 """
 
 from __future__ import annotations
@@ -16,15 +23,13 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-# Note: Prompt templates imported from app/prompts/ (not included in public repo)
 from app.prompts.prompts import (
-    COUNSELOR_PROMPT,
-    MATE_SYSTEM_PROMPT,
+    COUNSELOR_SYSTEM_PROMPT,
     OBSERVER_PROMPT,
     PLANNER_PROMPT,
     SCRIBE_PROMPT,
-    CONFIRM_END_PROMPT,
-    WRAP_UP_PROMPT,
+    WRAP_UP_MESSAGE,
+    get_confirm_end_message,
 )
 from app.agents.state import MeditationState, ThinkingEntry
 from app.config import settings
@@ -33,28 +38,20 @@ from app.services.rag import format_rag_context, search_theology
 logger = logging.getLogger(__name__)
 
 
-def _get_llm(temperature: float = 0.7, json_mode: bool = False) -> ChatGoogleGenerativeAI:
-    """Create an LLM instance"""
-    kwargs: dict[str, Any] = {
-        "model": settings.llm_model,
-        "temperature": temperature,
-        "google_api_key": settings.gemini_api_key,
-    }
-    if json_mode:
-        # Gemini does not use response_format={"type": "json_object"} like OpenAI.
-        # It handles JSON output via prompt instructions or specific model capabilities.
-        # However, for compatibility with the existing prompts that ask for JSON,
-        # we can rely on the model's ability to follow instructions.
-        pass
-    return ChatGoogleGenerativeAI(**kwargs)
+def _get_llm(temperature: float = 0.7) -> ChatGoogleGenerativeAI:
+    """Create an LLM instance."""
+    return ChatGoogleGenerativeAI(
+        model=settings.llm_model,
+        temperature=temperature,
+        google_api_key=settings.gemini_api_key,
+    )
 
 
 def _parse_json_response(text: str) -> dict:
-    """Parse JSON from LLM response (handles markdown code blocks)"""
+    """Parse JSON from LLM response (handles markdown code blocks)."""
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
-        # Strip first line (```json) and last line (```)
         json_lines = []
         in_block = False
         for line in lines:
@@ -74,7 +71,7 @@ def _parse_json_response(text: str) -> dict:
 
 
 # ──────────────────────────────────────────────
-# 1. Supervisor Node (pure code-based routing)
+# 1. Supervisor Node (pure code-based routing — no LLM)
 # ──────────────────────────────────────────────
 async def supervisor_node(state: MeditationState) -> dict:
     """Controls the overall meditation flow. Pure code-based routing — no LLM call."""
@@ -91,41 +88,37 @@ async def supervisor_node(state: MeditationState) -> dict:
             break
 
     # ── Keyword sets ──
-    end_keywords = ["정리", "마무리", "기도문", "끝", "종료", "노트"]
-    confirm_yes_keywords = ["네", "응", "끝낼게", "종료", "끝", "그래", "마무리", "좋아"]
-    confirm_no_keywords = ["아니", "계속", "더", "아직", "이어서", "안 끝"]
-    note_accept_keywords = ["노트", "만들어", "네", "좋아", "응", "부탁", "작성", "만들"]
-    note_reject_keywords = ["아니", "괜찮", "안 만들", "됐어", "필요없", "다음에"]
+    end_keywords = {"정리", "마무리", "기도문", "끝", "종료", "노트"}
+    confirm_yes_keywords = {"네", "응", "끝낼게", "종료", "끝", "그래", "마무리", "좋아"}
+    confirm_no_keywords = {"아니", "계속", "더", "아직", "이어서", "안 끝"}
+    note_accept_keywords = {"노트", "만들어", "네", "좋아", "응", "부탁", "작성", "만들"}
+    note_reject_keywords = {"아니", "괜찮", "안 만들", "됐어", "필요없", "다음에"}
 
     user_wants_end = any(kw in last_user_msg for kw in end_keywords)
 
-    # Detect previous node from thinking_log
-    last_thinking = state.get("thinking_log", [])
-    was_confirm_end = any(t.get("node") == "confirm_end" for t in last_thinking) if last_thinking else False
-    was_wrap_up = any(t.get("node") == "wrap_up" for t in last_thinking) if last_thinking else False
+    last_node = state.get("last_executed_node", "")
+    was_confirm_end = last_node == "confirm_end"
+    was_wrap_up = last_node == "wrap_up"
 
     # ── (A) After confirm_end: user responds yes/no ──
     if was_confirm_end and not end_confirmed:
         wants_end = any(kw in last_user_msg for kw in confirm_yes_keywords)
         wants_continue = any(kw in last_user_msg for kw in confirm_no_keywords)
         if wants_end:
-            reasoning = "사용자가 묵상 종료를 확정했습니다. 마무리 절차로 이동합니다."
+            reasoning = "사용자가 묵상 종료 확정"
             next_step = "wrap_up"
-            logger.info("[Supervisor] confirm_end → user confirmed end")
             return {
                 "next_step": next_step,
-                "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"next_step → {next_step}")],
+                "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"→ {next_step}")],
                 "turn_count": turn_count,
                 "end_confirmed": True,
             }
         else:
-            # User wants to continue (or ambiguous) → resume meditation
-            reasoning = "사용자가 묵상을 계속하기로 했습니다." if wants_continue else "응답이 모호하지만 묵상을 계속합니다."
+            reasoning = "사용자가 묵상 계속" if wants_continue else "응답 모호, 계속 진행"
             next_step = "observer"
-            logger.info("[Supervisor] confirm_end → user wants to continue")
             return {
                 "next_step": next_step,
-                "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"next_step → {next_step}")],
+                "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"→ {next_step}")],
                 "turn_count": turn_count,
                 "end_confirmed": False,
             }
@@ -135,57 +128,45 @@ async def supervisor_node(state: MeditationState) -> dict:
         wants_note = any(kw in last_user_msg for kw in note_accept_keywords)
         rejects_note = any(kw in last_user_msg for kw in note_reject_keywords)
         if wants_note:
-            reasoning = "사용자가 묵상 노트 생성을 요청했습니다."
             next_step = "scribe"
+            reasoning = "노트 생성 요청"
         elif rejects_note:
-            reasoning = "사용자가 묵상 노트 없이 마무리를 원합니다."
             next_step = "scribe"
+            reasoning = "노트 없이 마무리"
         else:
-            reasoning = "노트 생성 여부를 다시 확인합니다."
             next_step = "wrap_up"
+            reasoning = "노트 여부 재확인"
 
-        logger.info(f"[Supervisor] end_confirmed, note decision → {next_step}")
         return {
             "next_step": next_step,
-            "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"next_step → {next_step}")],
+            "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"→ {next_step}")],
             "turn_count": turn_count,
             "note_requested": wants_note if (wants_note or rejects_note) else None,
         }
 
-    # ── (C) Core routing logic (code-based, no LLM) ──
+    # ── (C) Core routing (code-based) ──
     if turn_count == 0:
-        reasoning = "새 묵상 시작 — 전략 수립(planner)이 필요합니다."
-        next_step = "planner"
+        next_step, reasoning = "planner", "새 묵상 — 전략 수립"
     elif end_confirmed:
-        reasoning = "묵상 종료 확정 — 노트 작성(scribe)으로 이동합니다."
-        next_step = "scribe"
+        next_step, reasoning = "scribe", "종료 확정 — 노트 작성"
     elif user_wants_end and depth < 90:
-        reasoning = f"사용자가 종료를 원하지만 깊이({depth}/100)가 아직 낮습니다. 종료 의사를 재확인합니다."
         next_step = "confirm_end"
+        reasoning = f"종료 요청 but depth={depth} → 재확인"
     elif user_wants_end:
-        reasoning = f"사용자가 종료를 원합니다 (depth={depth}) — 마무리로 이동합니다."
-        next_step = "wrap_up"
+        next_step, reasoning = "wrap_up", f"종료 요청 depth={depth} → 마무리"
     elif depth >= 90:
-        reasoning = f"묵상 깊이가 충분합니다 (depth={depth}/100) — 마무리 여부를 확인합니다."
-        next_step = "confirm_end"
+        next_step, reasoning = "confirm_end", f"depth={depth} 충분 → 마무리 확인"
     elif turn_count >= 8:
-        reasoning = f"대화가 충분히 진행되었습니다 (turn={turn_count}) — 마무리 여부를 확인합니다."
-        next_step = "confirm_end"
+        next_step, reasoning = "confirm_end", f"turn={turn_count} 충분 → 마무리 확인"
     else:
-        reasoning = f"묵상 계속 진행 (depth={depth}, turn={turn_count})"
         next_step = "observer"
-
-    thinking = ThinkingEntry(
-        node="supervisor",
-        reasoning=reasoning,
-        decision=f"next_step → {next_step}",
-    )
+        reasoning = f"묵상 계속 (depth={depth}, turn={turn_count})"
 
     logger.info(f"[Supervisor] turn={turn_count} depth={depth} → {next_step}")
 
     return {
         "next_step": next_step,
-        "thinking_log": [thinking],
+        "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"→ {next_step}")],
         "turn_count": turn_count,
     }
 
@@ -194,18 +175,18 @@ async def supervisor_node(state: MeditationState) -> dict:
 # 2. Planner Node
 # ──────────────────────────────────────────────
 async def planner_node(state: MeditationState) -> dict:
-    """Analyzes the scripture passage and builds a question strategy using RAG."""
+    """Analyzes the scripture passage and builds a question strategy using RAG.
+    key_rag_insights를 압축 추출하여 Counselor에게 전달 (전체 RAG 대신).
+    """
     scripture_ref = state.get("current_scripture", "")
     scripture_text = state.get("scripture_text", "")
     emotion = state.get("user_emotion", "")
 
-    ref_book = None
-    ref_chapter = None
+    ref_book = ref_chapter = None
     try:
         parts = scripture_ref.split(":")
         if len(parts) >= 3:
-            ref_book = int(parts[1])
-            ref_chapter = int(parts[2])
+            ref_book, ref_chapter = int(parts[1]), int(parts[2])
     except (ValueError, IndexError):
         pass
 
@@ -217,7 +198,7 @@ async def planner_node(state: MeditationState) -> dict:
     )
     rag_context = format_rag_context(rag_results)
 
-    llm = _get_llm(temperature=0.5, json_mode=True)
+    llm = _get_llm(temperature=0.5)
     prompt = PLANNER_PROMPT.format(
         scripture_ref=scripture_ref,
         scripture_text=scripture_text,
@@ -235,18 +216,20 @@ async def planner_node(state: MeditationState) -> dict:
         "그 말씀이 지금 당신의 삶에 어떤 의미로 다가오나요?",
         "이 말씀을 통해 오늘 어떤 기도를 드리고 싶으신가요?",
     ])
+    # Planner가 압축한 핵심 인사이트 (100자 이내) — Counselor에 전달
+    key_rag_insights = result.get("key_rag_insights", "") or ""
 
     thinking = ThinkingEntry(
         node="planner",
         reasoning=result.get("reasoning", "질문 전략 수립 완료"),
         decision=f"themes: {result.get('key_themes', [])}, questions: {len(strategy)}개",
     )
-
     logger.info(f"[Planner] strategy: {len(strategy)} questions, RAG hits: {len(rag_results)}")
 
     return {
         "question_strategy": strategy,
         "rag_context": rag_context,
+        "key_rag_insights": key_rag_insights,
         "thinking_log": [thinking],
     }
 
@@ -255,51 +238,50 @@ async def planner_node(state: MeditationState) -> dict:
 # 3. Counselor Node
 # ──────────────────────────────────────────────
 async def counselor_node(state: MeditationState) -> dict:
-    """Persona node that converses with the user in Mate's warm, encouraging tone."""
+    """Converses with the user in Mate's warm tone.
+
+    최적화:
+    - 기존 MATE_SYSTEM_PROMPT(플레이스홀더 미사용 버그) + COUNSELOR_PROMPT(scripture 중복)
+      → COUNSELOR_SYSTEM_PROMPT 단일 SystemMessage로 통합
+    - RAG 전체 대신 planner가 압축한 key_rag_insights만 전달
+    """
     scripture_ref = state.get("current_scripture", "")
     scripture_text = state.get("scripture_text", "")
     strategy = state.get("question_strategy", [])
-    rag_context = state.get("rag_context", "")
+    key_rag_insights = state.get("key_rag_insights", "") or "(신학 인사이트 없음)"
     turn_count = state.get("turn_count", 0)
     depth = state.get("meditation_depth", 0)
     emotion = state.get("user_emotion", "")
 
-    system = MATE_SYSTEM_PROMPT
-
-    counselor_guide = COUNSELOR_PROMPT.format(
+    system = COUNSELOR_SYSTEM_PROMPT.format(
         scripture_ref=scripture_ref,
         scripture_text=scripture_text,
         user_emotion=emotion or "미확인",
         question_strategy="\n".join(f"- {q}" for q in strategy) if strategy else "(자유 대화)",
+        key_rag_insights=key_rag_insights,
         turn_count=turn_count,
         meditation_depth=depth,
-        rag_context=rag_context or "(참조 자료 없음)",
     )
 
     llm = _get_llm(temperature=0.8)
 
-    conversation_messages = list(state.get("messages", []))[-10:]
-
+    conversation_messages = list(state.get("messages", []))[-20:]
     if not conversation_messages or not any(isinstance(m, HumanMessage) for m in conversation_messages):
         conversation_messages.append(
             HumanMessage(content=f"묵상을 시작합니다. 본문: {scripture_ref}")
         )
 
-    messages_for_llm = [
+    resp = await llm.ainvoke([
         SystemMessage(content=system),
-        SystemMessage(content=counselor_guide),
         *conversation_messages,
-    ]
-
-    resp = await llm.ainvoke(messages_for_llm)
+    ])
     ai_response = resp.content
 
     thinking = ThinkingEntry(
         node="counselor",
-        reasoning=f"turn={turn_count}, strategy 기반 대화 생성",
-        decision=f"응답 생성: {ai_response[:50]}...",
+        reasoning=f"turn={turn_count}, 전략 기반 대화 생성",
+        decision=f"응답: {ai_response[:50]}...",
     )
-
     logger.info(f"[Counselor] generated response ({len(ai_response)} chars)")
 
     return {
@@ -313,38 +295,35 @@ async def counselor_node(state: MeditationState) -> dict:
 # 4. Observer Node
 # ──────────────────────────────────────────────
 async def observer_node(state: MeditationState) -> dict:
-    """Measures the depth of the user's meditation response (0-100 score)."""
+    """Measures the depth of the user's meditation response (0-100).
+    간소화: 프롬프트 단축, HumanMessage 제거 (마지막 대화가 이미 컨텍스트에 포함됨).
+    """
     current_depth = state.get("meditation_depth", 0)
     messages = state.get("messages", [])
 
-    llm = _get_llm(temperature=0.3, json_mode=True)
+    llm = _get_llm(temperature=0.2)
     prompt = OBSERVER_PROMPT.format(current_depth=current_depth)
 
+    # 마지막 8개 메시지만 전달 (평가에 충분)
     resp = await llm.ainvoke([
         SystemMessage(content=prompt),
-        HumanMessage(content="위 본문과 묵상 내용을 분석하여 JSON으로 평가해주세요."),
-    ] + list(messages[-8:]))
+        *list(messages[-8:]),
+    ])
     result = _parse_json_response(resp.content)
 
-    new_depth = result.get("total_depth", current_depth)
-    new_depth = max(current_depth, min(100, new_depth))
-
-    assessment = result.get("assessment", "")
+    new_depth = max(0, min(100, result.get("total_depth", current_depth)))
     suggestion = result.get("suggestion", "")
 
     thinking = ThinkingEntry(
         node="observer",
-        reasoning=result.get("reasoning", assessment),
+        reasoning=result.get("reasoning", result.get("assessment", "")),
         decision=f"depth: {current_depth} → {new_depth}, suggestion: {suggestion}",
     )
-
-    next_step = "counselor"
-
-    logger.info(f"[Observer] depth: {current_depth} → {new_depth}, next → {next_step}")
+    logger.info(f"[Observer] depth: {current_depth} → {new_depth}")
 
     return {
         "meditation_depth": new_depth,
-        "next_step": next_step,
+        "next_step": "counselor",
         "thinking_log": [thinking],
     }
 
@@ -353,9 +332,10 @@ async def observer_node(state: MeditationState) -> dict:
 # 5. Scribe Node
 # ──────────────────────────────────────────────
 async def scribe_node(state: MeditationState) -> dict:
-    """Compiles the conversation into a structured meditation note with title, summary, insights, and prayer."""
+    """Compiles the conversation into a structured meditation note.
+    간소화: SCRIBE_PROMPT에 scripture_text 제거 (대화 기록에 이미 포함됨).
+    """
     scripture_ref = state.get("current_scripture", "")
-    scripture_text = state.get("scripture_text", "")
     messages = state.get("messages", [])
     note_requested = state.get("note_requested", True)
 
@@ -363,38 +343,31 @@ async def scribe_node(state: MeditationState) -> dict:
         closing = "오늘 묵상을 함께해서 감사해요! 하나님의 말씀이 오늘 하루도 함께하시길 기도해요. 🙏 다음에 또 함께 묵상해요! 😊"
         thinking = ThinkingEntry(
             node="scribe",
-            reasoning="사용자가 노트 생성을 원하지 않아 간단한 마무리 메시지 생성",
-            decision="no note, closing message only",
+            reasoning="사용자가 노트 생성 거절 — 간단한 마무리",
+            decision="no note",
         )
-        logger.info("[Scribe] user declined note, closing only")
+        logger.info("[Scribe] user declined note")
         return {
             "messages": [AIMessage(content=closing)],
             "meditation_note": {"title": "오늘의 묵상", "skipped": True},
             "thinking_log": [thinking],
         }
 
-    llm = _get_llm(temperature=0.7, json_mode=True)
-    prompt = SCRIBE_PROMPT.format(
-        scripture_ref=scripture_ref,
-        scripture_text=scripture_text,
-    )
-
-    # Limit conversation to last 20 messages to avoid token overflow
-    conversation_for_scribe = list(messages[-20:])
+    llm = _get_llm(temperature=0.7)
+    prompt = SCRIBE_PROMPT.format(scripture_ref=scripture_ref)
 
     try:
         resp = await llm.ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content="위 묵상 대화를 정리하여 JSON으로 묵상 노트를 작성해주세요. 반드시 1인칭('나')으로 작성하세요."),
-        ] + conversation_for_scribe)
+            *list(messages[-20:]),
+        ])
         result = _parse_json_response(resp.content)
     except Exception as e:
         logger.error(f"[Scribe] LLM call failed: {e}", exc_info=True)
         result = {}
 
-    # If JSON parse returned raw text, try to use it as reflection
     raw_text = result.get("raw", "")
-
     note = {
         "title": result.get("title", "오늘의 묵상"),
         "summary": result.get("summary", ""),
@@ -417,8 +390,7 @@ async def scribe_node(state: MeditationState) -> dict:
         reasoning="묵상 완료 — 노트 작성",
         decision=f"title: {note['title']}",
     )
-
-    logger.info(f"[Scribe] generated meditation note: {note['title']}")
+    logger.info(f"[Scribe] note: {note['title']}")
 
     return {
         "messages": [AIMessage(content=closing)],
@@ -428,76 +400,55 @@ async def scribe_node(state: MeditationState) -> dict:
 
 
 # ──────────────────────────────────────────────
-# 6. Confirm End Node
+# 6. Confirm End Node (LLM 제거 → 템플릿 기반)
 # ──────────────────────────────────────────────
 async def confirm_end_node(state: MeditationState) -> dict:
-    """Asks the user to confirm ending the meditation when depth is still low."""
+    """Asks the user to confirm ending meditation.
+
+    최적화: LLM 호출 제거 → get_confirm_end_message() 템플릿 사용
+    (세션당 LLM 1회 절약, 응답 속도 대폭 향상)
+    """
     depth = state.get("meditation_depth", 0)
     turn_count = state.get("turn_count", 0)
-    messages = state.get("messages", [])
 
-    llm = _get_llm(temperature=0.8)
-    prompt = CONFIRM_END_PROMPT.format(
-        meditation_depth=depth,
-        turn_count=turn_count,
-    )
-
-    conversation_messages = list(messages[-6:])
-    if not any(isinstance(m, HumanMessage) for m in conversation_messages):
-        conversation_messages.append(HumanMessage(content="끝낼래"))
-
-    resp = await llm.ainvoke([
-        SystemMessage(content=prompt),
-        *conversation_messages,
-    ])
+    message = get_confirm_end_message(depth, turn_count)
 
     thinking = ThinkingEntry(
         node="confirm_end",
-        reasoning=f"depth={depth}, 종료 의사 재확인",
-        decision="사용자에게 종료 여부 재문의",
+        reasoning=f"depth={depth}, 종료 의사 재확인 (템플릿)",
+        decision="사용자에게 종료 여부 질문",
     )
-
-    logger.info(f"[ConfirmEnd] depth={depth}, asking user to confirm")
+    logger.info(f"[ConfirmEnd] depth={depth}, using template message")
 
     return {
-        "messages": [AIMessage(content=resp.content)],
+        "messages": [AIMessage(content=message)],
         "turn_count": turn_count + 1,
         "thinking_log": [thinking],
+        "last_executed_node": "confirm_end",
     }
 
 
 # ──────────────────────────────────────────────
-# 7. Wrap Up Node
+# 7. Wrap Up Node (LLM 제거 → 템플릿 기반)
 # ──────────────────────────────────────────────
 async def wrap_up_node(state: MeditationState) -> dict:
-    """After meditation end is confirmed, asks whether to create a meditation note or just wrap up."""
-    depth = state.get("meditation_depth", 0)
-    messages = state.get("messages", [])
+    """After meditation end is confirmed, asks about note creation.
 
-    llm = _get_llm(temperature=0.8)
-    prompt = WRAP_UP_PROMPT.format(
-        meditation_depth=depth,
-    )
-
-    conversation_messages = list(messages[-4:])
-    if not any(isinstance(m, HumanMessage) for m in conversation_messages):
-        conversation_messages.append(HumanMessage(content="마무리할게"))
-
-    resp = await llm.ainvoke([
-        SystemMessage(content=prompt),
-        *conversation_messages,
-    ])
+    최적화: LLM 호출 제거 → WRAP_UP_MESSAGE 상수 사용
+    (세션당 LLM 1회 절약, 응답 속도 대폭 향상)
+    """
+    turn_count = state.get("turn_count", 0)
 
     thinking = ThinkingEntry(
         node="wrap_up",
-        reasoning="묵상 종료 확정 — 노트 생성 여부 질문",
-        decision="사용자에게 노트 생성 여부 질문",
+        reasoning="묵상 종료 확정 — 노트 여부 질문 (템플릿)",
+        decision="노트 생성 여부 질문",
     )
-
-    logger.info("[WrapUp] asking user about note creation")
+    logger.info("[WrapUp] asking about note creation (template)")
 
     return {
-        "messages": [AIMessage(content=resp.content)],
+        "messages": [AIMessage(content=WRAP_UP_MESSAGE)],
         "end_confirmed": True,
         "thinking_log": [thinking],
+        "last_executed_node": "wrap_up",
     }

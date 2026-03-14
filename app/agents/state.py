@@ -17,6 +17,11 @@ class ThinkingEntry(TypedDict):
     decision: str
 
 
+def _accumulate_list(left: list, right: list) -> list:
+    """LangGraph reducer: 리스트를 누적합니다 (thinking_log용)"""
+    return left + right
+
+
 class MeditationState(TypedDict):
     """Meditation agent shared state"""
 
@@ -43,16 +48,20 @@ class MeditationState(TypedDict):
 
     # Planner output
     question_strategy: list[str]  # Planned question points
-    rag_context: str             # RAG search result context
+    rag_context: str             # RAG search result context (full, used only by planner)
+    key_rag_insights: str        # Planner이 압축한 핵심 인사이트 (counselor에 전달)
 
-    # Thinking log (for test client CoT monitoring)
-    thinking_log: list[ThinkingEntry]
+    # Thinking log (auto-accumulated via _accumulate_list reducer — 노드 간 thinking이 유지됨)
+    thinking_log: Annotated[list[ThinkingEntry], _accumulate_list]
 
     # Scribe output (meditation note)
     meditation_note: dict[str, Any] | None
 
     # Referenced verses
     referenced_verses: list[dict]
+
+    # 이전 턴에서 마지막으로 실행된 노드 (supervisor 라우팅 판단용)
+    last_executed_node: str
 
 
 # ──────────────────────────────────────────────
@@ -81,7 +90,9 @@ def create_initial_state(
         note_requested=None,
         question_strategy=[],
         rag_context="",
+        key_rag_insights="",
         thinking_log=[],
         meditation_note=None,
         referenced_verses=[],
+        last_executed_node="",
     )

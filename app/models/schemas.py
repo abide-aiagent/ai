@@ -14,17 +14,17 @@ class SessionType(str, Enum):
 # ──────────────────────────────────────────────
 class MeditationStartRequest(BaseModel):
     """Meditation session start request"""
-    user_id: str
-    session_id: str
-    verse_ref: str  # "KRV:19:23:1" (main verse)
-    verse_refs: list[str] | None = None  # ["KRV:19:23:1-6", "KRV:43:3:16-18"] multi-verse
-    mood: str | None = None
+    user_id: str = Field(..., max_length=100)
+    session_id: str = Field(..., max_length=100)
+    verse_ref: str = Field(..., max_length=200)
+    verse_refs: list[str] | None = None
+    mood: str | None = Field(None, max_length=50)
 
 
 class MeditationChatRequest(BaseModel):
     """Meditation chat message"""
-    session_id: str
-    user_message: str
+    session_id: str = Field(..., max_length=100)
+    user_message: str = Field(..., max_length=5000)
 
 
 class MeditationResponse(BaseModel):

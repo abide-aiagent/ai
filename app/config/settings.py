@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     core_server_url: str = "http://localhost:8080"
     log_level: str = "info"
 
+    # Internal API key — Core 서버에서만 접근 허용
+    internal_api_key: str = os.getenv("INTERNAL_API_KEY", "")
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

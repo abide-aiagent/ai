@@ -1,8 +1,9 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
 from app.routers import agent
@@ -44,6 +45,21 @@ async def lifespan(app: FastAPI):
         pass
 
 
+class InternalApiKeyMiddleware(BaseHTTPMiddleware):
+    """Core 서버의 Internal API Key를 검증하는 미들웨어.
+    /api/v1/agent/* 경로에 대해 X-Internal-Key 헤더를 확인합니다.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        # Health check와 root는 인증 불필요
+        path = request.url.path
+        if path.startswith("/api/v1/agent"):
+            key = request.headers.get("X-Internal-Key", "")
+            if not settings.internal_api_key or key != settings.internal_api_key:
+                raise HTTPException(status_code=403, detail="Forbidden: Invalid internal API key")
+        return await call_next(request)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="ABIDE AI Agent Server",
@@ -52,18 +68,21 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS
+    # CORS — 기본값은 Core 서버만 허용
     import os
-    allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "*")
-    allowed_origins = ["*"] if allowed_origins_env == "*" else [o.strip() for o in allowed_origins_env.split(",")]
+    allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "http://localhost:8080")
+    allowed_origins = [o.strip() for o in allowed_origins_env.split(",")]
 
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Accept", "X-Internal-Key"],
     )
+
+    # Internal API key 검증 미들웨어
+    app.add_middleware(InternalApiKeyMiddleware)
 
     # Register router
     app.include_router(agent.router)

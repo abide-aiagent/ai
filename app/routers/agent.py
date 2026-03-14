@@ -1,10 +1,14 @@
 """
 AI Agent Router — Meditation (Mate), Theology Search (Ask), DeepLens endpoints
 SSE streaming support
+
+모든 /api/v1/agent/* 엔드포인트는 Core 서버를 통해서만 접근 가능합니다.
+(InternalApiKeyMiddleware에서 X-Internal-Key 헤더 검증)
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import time
@@ -77,7 +81,9 @@ async def _load_state(session_id: str) -> MeditationState | None:
             return state
     except Exception:
         pass
-    return _session_states.get(session_id)
+    # Deep copy로 반환하여 동시 요청 간 상태 오염 방지
+    stored = _session_states.get(session_id)
+    return copy.deepcopy(stored) if stored else None
 
 
 async def _remove_state(session_id: str) -> None:
@@ -171,7 +177,7 @@ async def meditation_start(req: MeditationStartRequest):
 
         except Exception as e:
             logger.error(f"Meditation start error: {e}", exc_info=True)
-            yield _sse_event("error", {"message": str(e)})
+            yield _sse_event("error", {"message": "묵상 시작 중 오류가 발생했습니다. 다시 시도해주세요."})
 
     return StreamingResponse(
         event_generator(),
@@ -250,7 +256,7 @@ async def meditation_chat(req: MeditationChatRequest):
 
         except Exception as e:
             logger.error(f"Meditation chat error: {e}", exc_info=True)
-            yield _sse_event("error", {"message": str(e)})
+            yield _sse_event("error", {"message": "묵상 진행 중 오류가 발생했습니다. 다시 시도해주세요."})
 
     return StreamingResponse(
         event_generator(),
@@ -360,7 +366,7 @@ async def theology_search(req: AskRequest):
 
         except Exception as e:
             logger.error(f"Ask error: {e}", exc_info=True)
-            yield _sse_event("error", {"message": str(e)})
+            yield _sse_event("error", {"message": "질문 처리 중 오류가 발생했습니다. 다시 시도해주세요."})
 
     return StreamingResponse(
         event_generator(),
@@ -517,7 +523,7 @@ async def classify_report(req: ReportClassifyRequest):
             confidence=data.get("confidence", 0.5),
         )
     except Exception as e:
-        logging.error(f"Failed to classify report: {e}")
+        logger.error(f"Failed to classify report: {e}", exc_info=True)
         return ReportClassifyResponse(
             severity="medium",
             suggested_action="review",
