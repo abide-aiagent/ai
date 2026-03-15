@@ -407,7 +407,7 @@ async def deep_lens_analyze(req: DeepLensRequest):
         rag_context=rag_context or "(참조 자료 없음)",
     )
 
-    resp = await llm.ainvoke([SystemMessage(content=prompt)])
+    resp = await llm.ainvoke([HumanMessage(content=prompt)])
     try:
         result = json.loads(resp.content)
     except json.JSONDecodeError:

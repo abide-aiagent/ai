@@ -63,6 +63,9 @@ class MeditationState(TypedDict):
     # 이전 턴에서 마지막으로 실행된 노드 (supervisor 라우팅 판단용)
     last_executed_node: str
 
+    # wrap_up 반복 방지 카운터 (block B else 분기 최대 1회 재질문 후 scribe로)
+    wrap_up_retry_count: int
+
 
 # ──────────────────────────────────────────────
 # Initial state creation helper
@@ -95,4 +98,5 @@ def create_initial_state(
         meditation_note=None,
         referenced_verses=[],
         last_executed_node="",
+        wrap_up_retry_count=0,
     )

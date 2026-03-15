@@ -91,8 +91,10 @@ async def supervisor_node(state: MeditationState) -> dict:
     end_keywords = {"정리", "마무리", "기도문", "끝", "종료", "노트"}
     confirm_yes_keywords = {"네", "응", "끝낼게", "종료", "끝", "그래", "마무리", "좋아"}
     confirm_no_keywords = {"아니", "계속", "더", "아직", "이어서", "안 끝"}
-    note_accept_keywords = {"노트", "만들어", "네", "좋아", "응", "부탁", "작성", "만들"}
-    note_reject_keywords = {"아니", "괜찮", "안 만들", "됐어", "필요없", "다음에"}
+    note_accept_keywords = {"노트", "만들어", "네", "좋아", "응", "부탁", "작성", "만들",
+                            "좋습니다", "알겠어요", "할게요", "예", "ㅇㅇ", "감사", "해줘", "해주세요", "부탁해"}
+    note_reject_keywords = {"아니", "괜찮", "안 만들", "됐어", "필요없", "다음에",
+                            "안해", "안 해", "노트 없이", "그냥", "넘어가"}
 
     user_wants_end = any(kw in last_user_msg for kw in end_keywords)
 
@@ -124,25 +126,51 @@ async def supervisor_node(state: MeditationState) -> dict:
             }
 
     # ── (B) After wrap_up: user responds about note ──
+    wrap_up_retry_count = state.get("wrap_up_retry_count", 0)
     if (was_wrap_up or end_confirmed) and note_requested is None and turn_count > 0:
         wants_note = any(kw in last_user_msg for kw in note_accept_keywords)
         rejects_note = any(kw in last_user_msg for kw in note_reject_keywords)
         if wants_note:
             next_step = "scribe"
             reasoning = "노트 생성 요청"
+            return {
+                "next_step": next_step,
+                "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"→ {next_step}")],
+                "turn_count": turn_count,
+                "note_requested": True,
+                "wrap_up_retry_count": 0,
+            }
         elif rejects_note:
             next_step = "scribe"
             reasoning = "노트 없이 마무리"
+            return {
+                "next_step": next_step,
+                "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"→ {next_step}")],
+                "turn_count": turn_count,
+                "note_requested": False,
+                "wrap_up_retry_count": 0,
+            }
+        elif wrap_up_retry_count >= 1:
+            # 재질문 후에도 응답 불명확 → 기본값으로 노트 생성
+            next_step = "scribe"
+            reasoning = "노트 여부 응답 불명확 (재질문 초과) — 기본 노트 생성"
+            return {
+                "next_step": next_step,
+                "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"→ {next_step}")],
+                "turn_count": turn_count,
+                "note_requested": True,
+                "wrap_up_retry_count": 0,
+            }
         else:
             next_step = "wrap_up"
-            reasoning = "노트 여부 재확인"
-
-        return {
-            "next_step": next_step,
-            "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"→ {next_step}")],
-            "turn_count": turn_count,
-            "note_requested": wants_note if (wants_note or rejects_note) else None,
-        }
+            reasoning = "노트 여부 재확인 (1회)"
+            return {
+                "next_step": next_step,
+                "thinking_log": [ThinkingEntry(node="supervisor", reasoning=reasoning, decision=f"→ {next_step}")],
+                "turn_count": turn_count,
+                "note_requested": None,
+                "wrap_up_retry_count": wrap_up_retry_count + 1,
+            }
 
     # ── (C) Core routing (code-based) ──
     if turn_count == 0:

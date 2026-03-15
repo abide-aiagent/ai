@@ -438,7 +438,7 @@ async def deep_lens_analyze(req: DeepLensRequest):
                 verse_text=verse_text or "(본문 로딩 실패)",
                 rag_context=rag_context or "(참조 자료 없음)",
             )
-            resp = await llm.ainvoke([SystemMessage(content=prompt)])
+            resp = await llm.ainvoke([HumanMessage(content=prompt)])
             raw_content = resp.content
         except Exception as e:
             logger.error(f"DeepLens LLM call failed for {req.verse_ref}: {e}", exc_info=True)
