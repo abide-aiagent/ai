@@ -173,8 +173,13 @@ async def supervisor_node(state: MeditationState) -> dict:
             }
 
     # ── (C) Core routing (code-based) ──
-    if turn_count == 0:
+    current_next_step = state.get("next_step")
+    if turn_count == 0 and current_next_step == "verse_finder":
+        next_step, reasoning = "verse_finder", "구절 없이 묵상 시작 — VerseFinder 노드"
+    elif turn_count == 0:
         next_step, reasoning = "planner", "새 묵상 — 전략 수립"
+    elif current_next_step == "verse_finder":
+        next_step, reasoning = "verse_finder", "구절 탐색 계속"
     elif end_confirmed:
         next_step, reasoning = "scribe", "종료 확정 — 노트 작성"
     elif user_wants_end and depth < 90:

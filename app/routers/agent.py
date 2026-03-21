@@ -24,7 +24,7 @@ from app.agents.graph import continue_meditation, start_meditation
 from app.prompts.prompts import ASK_SYSTEM_PROMPT, DEEP_LENS_PROMPT, MOOD_VERSES
 from app.agents.state import MeditationState
 from app.config import settings
-from app.services.database import get_mood_verses_from_db
+from app.services.database import get_mood_verses_from_db, save_session_state_to_db, load_session_state_from_db, clear_session_snapshot
 from app.models.schemas import (
     AskRequest,
     AskResponse,
@@ -45,6 +45,7 @@ from app.services.database import (
     get_deep_lens_cache,
     get_passage_text,
     save_ai_message,
+    save_meditation_note,
     save_deep_lens_cache,
 )
 from app.services.rag import format_rag_context, search_theology
@@ -64,16 +65,33 @@ router = APIRouter(prefix="/api/v1/agent", tags=["AI Agent"])
 _session_states: dict[str, MeditationState] = {}  # In-memory fallback when Redis is unavailable
 
 
+# 매 N turn마다 DB에 스냅샷 저장
+DB_SNAPSHOT_INTERVAL = 3  # 3 turn마다 DB 저장
+
 async def _save_state(session_id: str, state: MeditationState) -> None:
-    """Save session state (Redis-first, in-memory fallback on failure)"""
+    """Redis 저장 + 일정 주기로 DB 스냅샷"""
+    # 항상 Redis에 저장
     try:
         await save_session_state(session_id, state)
     except Exception:
         _session_states[session_id] = state
 
+    # 3 turn마다 또는 세션 종료 시 DB에 스냅샷 저장
+    # ⚠️ turn_count > 0 조건 추가: turn 0(세션 생성 직후)에 빈 스냅샷 저장 방지
+    turn_count = state.get("turn_count", 0)
+    is_final = state.get("end_confirmed", False)
+
+    if (turn_count > 0 and turn_count % DB_SNAPSHOT_INTERVAL == 0) or is_final:
+        try:
+            await save_session_state_to_db(session_id, state)
+            logger.info(f"세션 {session_id} DB 스냅샷 저장 완료 (turn={turn_count})")
+        except Exception as e:
+            logger.warning(f"DB 스냅샷 저장 실패 (무시됨): {e}")
+
 
 async def _load_state(session_id: str) -> MeditationState | None:
-    """Load session state (Redis-first, in-memory fallback on failure)"""
+    """Redis 조회 → 없으면 DB에서 복원 → 없으면 None"""
+    # 1. Redis 조회
     try:
         state = await load_session_state(session_id)
         if state:
@@ -81,9 +99,24 @@ async def _load_state(session_id: str) -> MeditationState | None:
             return state
     except Exception:
         pass
-    # Deep copy로 반환하여 동시 요청 간 상태 오염 방지
+
+    # 2. in-memory 폴백
     stored = _session_states.get(session_id)
-    return copy.deepcopy(stored) if stored else None
+    if stored:
+        return copy.deepcopy(stored)
+
+    # 3. DB에서 복원 (Redis miss + in-memory miss)
+    try:
+        state = await load_session_state_from_db(session_id)
+        if state:
+            logger.info(f"세션 {session_id} DB에서 복원 성공")
+            # 복원된 상태를 Redis에 다시 캐싱
+            await save_session_state(session_id, state)
+            return state
+    except Exception as e:
+        logger.warning(f"DB 복원 실패: {e}")
+
+    return None
 
 
 async def _remove_state(session_id: str) -> None:
@@ -93,6 +126,11 @@ async def _remove_state(session_id: str) -> None:
     except Exception:
         pass
     _session_states.pop(session_id, None)
+
+    try:
+        await clear_session_snapshot(session_id)
+    except Exception as e:
+        logger.warning(f"DB 세션 스냅샷 정리 실패: {e}")
 
 
 # ──────────────────────────────────────────────
@@ -139,6 +177,8 @@ async def meditation_start(req: MeditationStartRequest):
                 verse_ref=req.verse_ref,
                 verse_refs=req.verse_refs,
                 mood=req.mood or "",
+                session_type=req.session_type,
+                initial_query=req.initial_query,
             )
 
             # Save session state (Redis)
@@ -174,6 +214,10 @@ async def meditation_start(req: MeditationStartRequest):
                 referenced_verses=result.get("referenced_verses"),
                 latency_ms=elapsed,
             )
+
+            # Save meditation note to DB if generated
+            if result.get("meditation_note"):
+                await save_meditation_note(req.session_id, result["meditation_note"])
 
         except Exception as e:
             logger.error(f"Meditation start error: {e}", exc_info=True)
@@ -250,6 +294,10 @@ async def meditation_chat(req: MeditationChatRequest):
                 latency_ms=elapsed,
             )
 
+            # Save meditation note to DB if generated
+            if result.get("meditation_note"):
+                await save_meditation_note(req.session_id, result["meditation_note"])
+
             # Clean up session state on meditation completion
             if result["is_final"]:
                 await _remove_state(req.session_id)
@@ -280,6 +328,8 @@ async def meditation_start_sync(req: MeditationStartRequest):
             verse_ref=req.verse_ref,
             verse_refs=req.verse_refs,
             mood=req.mood or "",
+            session_type=req.session_type,
+            initial_query=req.initial_query,
         )
         await _save_state(req.session_id, result["state"])
 

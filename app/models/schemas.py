@@ -16,9 +16,11 @@ class MeditationStartRequest(BaseModel):
     """Meditation session start request"""
     user_id: str = Field(..., max_length=100)
     session_id: str = Field(..., max_length=100)
-    verse_ref: str = Field(..., max_length=200)
+    verse_ref: str | None = None
     verse_refs: list[str] | None = None
     mood: str | None = Field(None, max_length=50)
+    session_type: str = "meditation"
+    initial_query: str | None = None
 
 
 class MeditationChatRequest(BaseModel):

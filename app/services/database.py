@@ -301,3 +301,94 @@ async def get_mood_verses_from_db(mood: str) -> list[dict]:
     except Exception as e:
         logger.warning(f"get_mood_verses_from_db failed (mood={mood}): {e}")
     return []
+
+import json
+
+async def save_meditation_note(session_id: str, note: dict) -> None:
+    pool = get_pool()
+    query = """
+        UPDATE ai_sessions
+        SET title = $1,
+            summary_result = $2,
+            user_reflection = $3,
+            key_insights = $4::jsonb,
+            prayer_text = $5,
+            updated_at = NOW()
+        WHERE id = $6
+    """
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                query,
+                note.get("title", "오늘의 묵상"),
+                note.get("summary", ""),
+                note.get("reflection", ""),
+                json.dumps(note.get("key_insights", [])),
+                note.get("prayer", ""),
+                session_id
+            )
+    except Exception as e:
+        logger.error(f"Failed to save meditation note: {e}")
+
+async def save_session_state_to_db(session_id: str, state: dict) -> None:
+    """
+    세션 상태를 DB의 ai_sessions.state_snapshot에 저장합니다.
+    messages 필드는 LangChain 메시지 직렬화 형식으로 변환합니다.
+    """
+    from app.services.message_serializer import serialize_messages
+    from datetime import datetime, timezone
+    
+    # LangChain BaseMessage 객체를 JSON 직렬화 가능한 형태로 변환
+    state_copy = dict(state)
+    state_copy['messages'] = serialize_messages(state.get('messages', []))
+
+    # thinking_log의 TypedDict도 직렬화
+    state_copy['thinking_log'] = [dict(entry) for entry in state.get('thinking_log', [])]
+    
+    async with get_conn() as conn:
+        await conn.execute(
+            """
+            UPDATE ai_sessions
+            SET state_snapshot = %s, state_saved_at = %s
+            WHERE id = %s
+            """,
+            (
+                json.dumps(state_copy, ensure_ascii=False),
+                datetime.now(timezone.utc),
+                session_id,
+            ),
+        )
+
+async def load_session_state_from_db(session_id: str) -> dict | None:
+    """
+    DB의 ai_sessions.state_snapshot에서 세션 상태를 복원합니다.
+    """
+    from app.services.message_serializer import deserialize_messages
+
+    async with get_conn() as conn:
+        row = await conn.execute(
+            "SELECT state_snapshot FROM ai_sessions WHERE id = %s",
+            (session_id,),
+        )
+        result = await row.fetchone()
+
+    if not result or not result[0]:
+        return None
+
+    state = result[0]
+    if isinstance(state, str):
+        state = json.loads(state)
+
+    # LangChain 메시지 역직렬화
+    state['messages'] = deserialize_messages(state.get('messages', []))
+
+    return state
+
+async def clear_session_snapshot(session_id: str) -> None:
+    """완료된 세션의 state_snapshot 정리 (스토리지 절약)"""
+    async with get_conn() as conn:
+        await conn.execute(
+            "UPDATE ai_sessions SET state_snapshot = NULL WHERE id = %s",
+            (session_id,),
+        )
+

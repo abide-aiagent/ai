@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _redis: aioredis.Redis | None = None
 
 SESSION_PREFIX = "abide:session:"
-SESSION_TTL = 60 * 60 * 2  # 2 hours (meditation session lifetime)
+SESSION_TTL = 86400  # 24시간 (meditation session lifetime)
 
 
 async def init_redis() -> None:

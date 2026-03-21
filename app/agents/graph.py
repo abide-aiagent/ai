@@ -30,6 +30,7 @@ from app.agents.nodes import (
     supervisor_node,
     wrap_up_node,
 )
+from app.agents.verse_finder_node import verse_finder_node
 from app.agents.state import MeditationState, create_initial_state
 from app.services.database import get_passage_text
 
@@ -39,7 +40,11 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 # Routing functions
 # ──────────────────────────────────────────────
-def route_from_supervisor(state: MeditationState) -> Literal["planner", "observer", "scribe", "confirm_end", "wrap_up"]:
+def route_from_verse_finder(state: MeditationState) -> Literal["planner", "verse_finder"]:
+    """Route from verse_finder: planner when configured, verse_finder to await user"""
+    return state.get("next_step", "verse_finder")
+
+def route_from_supervisor(state: MeditationState) -> Literal["planner", "observer", "scribe", "confirm_end", "wrap_up", "verse_finder"]:
     """Route to next node based on Supervisor's decision"""
     return state.get("next_step", "planner")
 
@@ -65,6 +70,7 @@ def build_meditation_graph() -> StateGraph:
     graph.add_node("scribe", scribe_node)
     graph.add_node("confirm_end", confirm_end_node)
     graph.add_node("wrap_up", wrap_up_node)
+    graph.add_node("verse_finder", verse_finder_node)
 
     # Define edges
     graph.set_entry_point("supervisor")
@@ -78,6 +84,7 @@ def build_meditation_graph() -> StateGraph:
             "scribe": "scribe",
             "confirm_end": "confirm_end",
             "wrap_up": "wrap_up",
+            "verse_finder": "verse_finder",
         },
     )
 
@@ -96,6 +103,15 @@ def build_meditation_graph() -> StateGraph:
     graph.add_edge("scribe", END)
     graph.add_edge("confirm_end", END)
     graph.add_edge("wrap_up", END)
+
+    graph.add_conditional_edges(
+        "verse_finder",
+        lambda state: state.get("next_step", "verse_finder"),
+        {
+            "planner": "planner",
+            "verse_finder": END,
+        }
+    )
 
     return graph.compile()
 
@@ -144,18 +160,37 @@ async def start_meditation(
     *,
     user_id: str,
     session_id: str,
-    verse_ref: str,
+    verse_ref: str | None = None,
     verse_refs: list[str] | None = None,
     mood: str = "",
+    session_type: str = "meditation",
+    initial_query: str | None = None,
 ) -> dict[str, Any]:
     """
     Start a new meditation session.
     verse_ref format: "KRV:book:chapter:verse" (e.g. "KRV:19:23:1")
-    verse_refs: multi-verse support (e.g. ["KRV:19:23:1-6", "KRV:43:3:16-18"])
     """
+    if session_type == "verse_finder" or (not verse_ref and initial_query):
+        # VerseFinder mode
+        initial_state = create_initial_state(
+            user_id=user_id,
+            session_id=session_id,
+            verse_ref="",
+            scripture_text="",
+            mood=mood,
+        )
+        initial_state["next_step"] = "verse_finder"
+        if initial_query:
+            initial_state["messages"] = [HumanMessage(content=initial_query)]
+        
+        result = await meditation_graph.ainvoke(initial_state)
+        return _extract_response(result, "")
+
+    # Normal meditation mode
     # Collect multi-verse texts
-    all_refs = verse_refs if verse_refs else [verse_ref]
+    all_refs = verse_refs if verse_refs else ([verse_ref] if verse_ref else [])
     scripture_parts = []
+
     
     for ref in all_refs:
         text = await _fetch_single_verse_text(ref)
