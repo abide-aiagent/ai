@@ -74,7 +74,7 @@ class DeepLensResponse(BaseModel):
     verse_text: str = ""
     context_guide: str = ""
     interpretation: str = ""
-    application: str = ""
+    application: list[str] = Field(default_factory=list)
     cross_references: list[dict] = Field(default_factory=list)
     cached: bool = False
 

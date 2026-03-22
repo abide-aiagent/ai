@@ -127,7 +127,15 @@ async def verse_finder_node(state: MeditationState) -> dict:
         # 구절을 찾았으면 DB에서 구절 텍스트도 가져온 뒤 묵상 시작
         logger.info(f"VerseFinder: 구절 파싱 성공 → {verse_ref}")
         from app.services.database import get_passage_text
-        scripture_text = await get_passage_text(verse_ref) or ""
+        scripture_text = ""
+        try:
+            parts = verse_ref.split(":")
+            if len(parts) >= 4:
+                scripture_text = await get_passage_text(
+                    parts[0], int(parts[1]), int(parts[2]), int(parts[3])
+                ) or ""
+        except Exception as e:
+            logger.warning(f"VerseFinder: 구절 텍스트 로딩 실패 ({verse_ref}): {e}")
 
         return {
             "current_scripture": verse_ref,

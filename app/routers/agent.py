@@ -59,6 +59,15 @@ from app.services.redis_store import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/agent", tags=["AI Agent"])
 
+
+def _normalize_application(value) -> list[str]:
+    """application 필드 정규화 — LLM이 list 또는 string 모두 반환할 수 있음."""
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    if isinstance(value, str) and value:
+        return [value]
+    return []
+
 # ──────────────────────────────────────────────
 # Session state store (Redis-first, in-memory fallback)
 # ──────────────────────────────────────────────
@@ -457,7 +466,7 @@ async def deep_lens_analyze(req: DeepLensRequest):
                     verse_ref=req.verse_ref,
                     context_guide=cached["context_guide"],
                     interpretation=cached["interpretation"],
-                    application=cached["application"],
+                    application=_normalize_application(cached["application"]),
                     cross_references=cached.get("cross_references") or [],
                     cached=True,
                 )
@@ -534,7 +543,7 @@ async def deep_lens_analyze(req: DeepLensRequest):
             verse_text=verse_text,
             context_guide=result.get("context_guide", ""),
             interpretation=result.get("interpretation", ""),
-            application=result.get("application", ""),
+            application=_normalize_application(result.get("application")),
             cross_references=result.get("cross_references", []),
             cached=False,
         )

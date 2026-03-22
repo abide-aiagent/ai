@@ -172,10 +172,18 @@ async def get_deep_lens_cache(verse_ref: str) -> dict | None:
                 "UPDATE deep_lens_cache SET hit_count = hit_count + 1 WHERE verse_ref = %s",
                 (verse_ref,),
             )
+            import json as _json
+            # application: JSON 배열 문자열이면 파싱, 아니면 string 그대로
+            raw_app = row[2]
+            try:
+                application = _json.loads(raw_app) if raw_app else []
+            except (ValueError, TypeError):
+                application = raw_app  # 기존 string 포맷 폴백
+
             return {
                 "context_guide": row[0],
                 "interpretation": row[1],
-                "application": row[2],
+                "application": application,
                 "cross_references": row[3],
                 "hit_count": row[4] + 1,
             }
@@ -186,11 +194,17 @@ async def save_deep_lens_cache(
     verse_ref: str,
     context_guide: str,
     interpretation: str,
-    application: str,
+    application: list[str] | str,
     cross_references: list[dict] | None = None,
 ) -> None:
     """Save DeepLens analysis result to cache"""
     import json
+
+    # application은 list로 저장 (기존 string도 호환)
+    if isinstance(application, list):
+        application_str = json.dumps(application, ensure_ascii=False)
+    else:
+        application_str = application
 
     async with get_conn() as conn:
         await conn.execute(
@@ -210,7 +224,7 @@ async def save_deep_lens_cache(
                 verse_ref,
                 context_guide,
                 interpretation,
-                application,
+                application_str,
                 json.dumps(cross_references or [], ensure_ascii=False),
             ),
         )
