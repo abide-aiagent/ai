@@ -40,13 +40,10 @@ def _get_llm(temperature: float = 0.7, json_mode: bool = False) -> ChatGoogleGen
         "model": settings.llm_model,
         "temperature": temperature,
         "google_api_key": settings.gemini_api_key,
+        # streaming=True가 있어야 astream_events에서 on_chat_model_stream 토큰 이벤트가 발생함
+        # json_mode는 구조화 출력이므로 스트리밍 불필요
+        "streaming": not json_mode,
     }
-    if json_mode:
-        # Gemini does not use response_format={"type": "json_object"} like OpenAI.
-        # It handles JSON output via prompt instructions or specific model capabilities.
-        # However, for compatibility with the existing prompts that ask for JSON,
-        # we can rely on the model's ability to follow instructions.
-        pass
     return ChatGoogleGenerativeAI(**kwargs)
 
 

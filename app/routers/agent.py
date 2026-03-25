@@ -19,7 +19,12 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from app.agents.graph import continue_meditation, start_meditation
+from app.agents.graph import (
+    continue_meditation,
+    continue_meditation_streaming,
+    start_meditation,
+    start_meditation_streaming,
+)
 # Note: Prompt templates imported from app/prompts/ (not included in public repo)
 from app.prompts.prompts import ASK_SYSTEM_PROMPT, DEEP_LENS_PROMPT, MOOD_VERSES
 from app.agents.state import MeditationState
@@ -180,7 +185,10 @@ async def meditation_start(req: MeditationStartRequest):
                 verse_ref=req.verse_ref,
             )
 
-            result = await start_meditation(
+            result: dict | None = None
+
+            # 토큰 단위 스트리밍 — counselor/wrap_up/confirm_end 노드의 LLM 출력을 즉시 전달
+            async for item in start_meditation_streaming(
                 user_id=req.user_id,
                 session_id=req.session_id,
                 verse_ref=req.verse_ref,
@@ -188,7 +196,15 @@ async def meditation_start(req: MeditationStartRequest):
                 mood=req.mood or "",
                 session_type=req.session_type,
                 initial_query=req.initial_query,
-            )
+            ):
+                if item["type"] == "token":
+                    yield _sse_event("message", {"chunk": item["content"]})
+                elif item["type"] == "result":
+                    result = item["data"]
+
+            if result is None:
+                yield _sse_event("error", {"message": "묵상 응답을 생성하지 못했습니다."})
+                return
 
             # Save session state (Redis)
             await _save_state(req.session_id, result["state"])
@@ -196,9 +212,6 @@ async def meditation_start(req: MeditationStartRequest):
             # Send thinking events (CoT monitoring)
             for entry in result.get("thinking_log", []):
                 yield _sse_event("thinking", entry)
-
-            # Send message event
-            yield _sse_event("message", {"chunk": result["content"]})
 
             # Send referenced verse events
             for verse in result.get("referenced_verses", []):
@@ -259,10 +272,21 @@ async def meditation_chat(req: MeditationChatRequest):
                 content=req.user_message,
             )
 
-            result = await continue_meditation(
+            result: dict | None = None
+
+            # 토큰 단위 스트리밍
+            async for item in continue_meditation_streaming(
                 session_state=session_state,
                 user_message=req.user_message,
-            )
+            ):
+                if item["type"] == "token":
+                    yield _sse_event("message", {"chunk": item["content"]})
+                elif item["type"] == "result":
+                    result = item["data"]
+
+            if result is None:
+                yield _sse_event("error", {"message": "묵상 응답을 생성하지 못했습니다."})
+                return
 
             # Update session state (Redis)
             await _save_state(req.session_id, result["state"])
@@ -270,9 +294,6 @@ async def meditation_chat(req: MeditationChatRequest):
             # Send thinking events
             for entry in result.get("thinking_log", []):
                 yield _sse_event("thinking", entry)
-
-            # Send message event
-            yield _sse_event("message", {"chunk": result["content"]})
 
             # Referenced verses
             for verse in result.get("referenced_verses", []):

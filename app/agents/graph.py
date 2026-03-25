@@ -16,7 +16,7 @@ Graph flow:
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Any, AsyncGenerator, Literal
 
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
@@ -237,6 +237,110 @@ async def continue_meditation(
     result = await meditation_graph.ainvoke(updated_state)
 
     return _extract_response(result, session_state.get("scripture_text", ""))
+
+
+# 사용자에게 직접 보이는 응답을 생성하는 노드 — 이 노드의 LLM 토큰만 스트리밍
+_STREAMING_NODES = frozenset({"counselor", "wrap_up", "confirm_end"})
+
+
+async def start_meditation_streaming(
+    *,
+    user_id: str,
+    session_id: str,
+    verse_ref: str | None = None,
+    verse_refs: list[str] | None = None,
+    mood: str = "",
+    session_type: str = "meditation",
+    initial_query: str | None = None,
+) -> AsyncGenerator[dict, None]:
+    """
+    start_meditation의 스트리밍 버전.
+    {"type": "token", "content": "..."} — counselor/wrap_up/confirm_end의 LLM 토큰
+    {"type": "result", "data": {...}}   — 그래프 완료 후 최종 결과
+    """
+    if session_type == "verse_finder" or (not verse_ref and initial_query):
+        initial_state = create_initial_state(
+            user_id=user_id,
+            session_id=session_id,
+            verse_ref="",
+            scripture_text="",
+            mood=mood,
+        )
+        initial_state["next_step"] = "verse_finder"
+        if initial_query:
+            initial_state["messages"] = [HumanMessage(content=initial_query)]
+        scripture_text = ""
+    else:
+        all_refs = verse_refs if verse_refs else ([verse_ref] if verse_ref else [])
+        scripture_parts = []
+        for ref in all_refs:
+            text = await _fetch_single_verse_text(ref)
+            scripture_parts.append(text)
+        scripture_text = "\n\n".join(scripture_parts)
+        display_ref = verse_ref if not verse_refs else ", ".join(verse_refs)
+        initial_state = create_initial_state(
+            user_id=user_id,
+            session_id=session_id,
+            verse_ref=display_ref,
+            scripture_text=scripture_text,
+            mood=mood,
+        )
+
+    final_output: MeditationState | None = None
+
+    async for event in meditation_graph.astream_events(initial_state, version="v2"):
+        kind = event["event"]
+
+        # counselor/wrap_up/confirm_end 노드의 LLM 토큰 → 즉시 스트리밍
+        if kind == "on_chat_model_stream":
+            node = event.get("metadata", {}).get("langgraph_node", "")
+            if node in _STREAMING_NODES:
+                chunk = event["data"]["chunk"]
+                content = getattr(chunk, "content", "")
+                if content:
+                    yield {"type": "token", "content": content}
+
+        # 그래프 전체 완료 — 최종 상태 캡처
+        elif kind == "on_chain_end" and event.get("name") == "LangGraph":
+            final_output = event["data"].get("output")
+
+    if final_output is not None:
+        yield {"type": "result", "data": _extract_response(final_output, scripture_text)}
+
+
+async def continue_meditation_streaming(
+    *,
+    session_state: MeditationState,
+    user_message: str,
+) -> AsyncGenerator[dict, None]:
+    """
+    continue_meditation의 스트리밍 버전.
+    """
+    updated_state = dict(session_state)
+    updated_state["messages"] = list(session_state.get("messages", [])) + [
+        HumanMessage(content=user_message)
+    ]
+    updated_state["thinking_log"] = []
+
+    scripture_text = session_state.get("scripture_text", "")
+    final_output: MeditationState | None = None
+
+    async for event in meditation_graph.astream_events(updated_state, version="v2"):
+        kind = event["event"]
+
+        if kind == "on_chat_model_stream":
+            node = event.get("metadata", {}).get("langgraph_node", "")
+            if node in _STREAMING_NODES:
+                chunk = event["data"]["chunk"]
+                content = getattr(chunk, "content", "")
+                if content:
+                    yield {"type": "token", "content": content}
+
+        elif kind == "on_chain_end" and event.get("name") == "LangGraph":
+            final_output = event["data"].get("output")
+
+    if final_output is not None:
+        yield {"type": "result", "data": _extract_response(final_output, scripture_text)}
 
 
 def _extract_response(result: MeditationState, scripture_text: str) -> dict[str, Any]:
