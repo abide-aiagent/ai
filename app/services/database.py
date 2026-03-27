@@ -319,30 +319,31 @@ async def get_mood_verses_from_db(mood: str) -> list[dict]:
 import json
 
 async def save_meditation_note(session_id: str, note: dict) -> None:
-    pool = get_pool()
-    query = """
-        UPDATE ai_sessions
-        SET title = $1,
-            summary_result = $2,
-            user_reflection = $3,
-            key_insights = $4::jsonb,
-            prayer_text = $5,
-            updated_at = NOW()
-        WHERE id = $6
-    """
     try:
-        async with pool.acquire() as conn:
+        async with get_conn() as conn:
             await conn.execute(
-                query,
-                note.get("title", "오늘의 묵상"),
-                note.get("summary", ""),
-                note.get("reflection", ""),
-                json.dumps(note.get("key_insights", [])),
-                note.get("prayer", ""),
-                session_id
+                """
+                UPDATE ai_sessions
+                SET title = %s,
+                    summary_result = %s,
+                    user_reflection = %s,
+                    key_insights = %s::jsonb,
+                    prayer_text = %s,
+                    updated_at = NOW()
+                WHERE id = %s::uuid
+                """,
+                (
+                    note.get("title", "오늘의 묵상"),
+                    note.get("summary", ""),
+                    note.get("reflection", ""),
+                    json.dumps(note.get("key_insights", []), ensure_ascii=False),
+                    note.get("prayer", ""),
+                    session_id,
+                ),
             )
+        logger.info(f"묵상 노트 저장 완료 (session_id={session_id})")
     except Exception as e:
-        logger.error(f"Failed to save meditation note: {e}")
+        logger.error(f"Failed to save meditation note (session_id={session_id}): {e}")
 
 async def save_session_state_to_db(session_id: str, state: dict) -> None:
     """

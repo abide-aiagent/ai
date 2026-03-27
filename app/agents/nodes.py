@@ -344,7 +344,7 @@ async def observer_node(state: MeditationState) -> dict:
     ])
     result = _parse_json_response(resp.content)
 
-    new_depth = max(0, min(100, result.get("total_depth", current_depth)))
+    new_depth = int(max(0, min(100, result.get("total_depth", current_depth))))
     suggestion = result.get("suggestion", "")
 
     thinking = ThinkingEntry(
