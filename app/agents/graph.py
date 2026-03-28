@@ -22,6 +22,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
 
 from app.agents.nodes import (
+    _extract_text_content,
     confirm_end_node,
     counselor_node,
     observer_node,
@@ -286,7 +287,7 @@ async def start_meditation_streaming(
             node = event.get("metadata", {}).get("langgraph_node", "")
             if node in _STREAMING_NODES:
                 chunk = event["data"]["chunk"]
-                content = getattr(chunk, "content", "")
+                content = _extract_text_content(getattr(chunk, "content", ""))
                 if content:
                     has_streamed = True
                     yield {"type": "token", "content": content}
@@ -326,7 +327,7 @@ async def continue_meditation_streaming(
             node = event.get("metadata", {}).get("langgraph_node", "")
             if node in _STREAMING_NODES:
                 chunk = event["data"]["chunk"]
-                content = getattr(chunk, "content", "")
+                content = _extract_text_content(getattr(chunk, "content", ""))
                 if content:
                     has_streamed = True
                     yield {"type": "token", "content": content}
