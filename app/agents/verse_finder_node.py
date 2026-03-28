@@ -18,6 +18,7 @@ import re
 import logging
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from app.agents.nodes import _extract_text_content
 from app.agents.state import MeditationState
 from app.config import settings
 
@@ -189,7 +190,7 @@ async def verse_finder_node(state: MeditationState) -> dict:
         response = await llm.ainvoke([HumanMessage(content=prompt)])
         return {
             "next_step": "verse_finder",  # 아직 구절 미결정, 계속 대기
-            "messages": [AIMessage(content=response.content)],
+            "messages": [AIMessage(content=_extract_text_content(response.content))],
             "last_executed_node": "verse_finder",
             "turn_count": state.get("turn_count", 0) + 1,
         }

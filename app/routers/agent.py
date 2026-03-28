@@ -25,6 +25,7 @@ from app.agents.graph import (
     start_meditation,
     start_meditation_streaming,
 )
+from app.agents.nodes import _extract_text_content
 # Note: Prompt templates imported from app/prompts/ (not included in public repo)
 from app.prompts.prompts import ASK_SYSTEM_PROMPT, DEEP_LENS_PROMPT, MOOD_VERSES
 from app.agents.state import MeditationState
@@ -456,8 +457,9 @@ async def theology_search(req: AskRequest):
                 SystemMessage(content=system),
                 HumanMessage(content=req.query),
             ]):
-                if chunk.content:
-                    yield _sse_event("message", {"chunk": chunk.content})
+                text = _extract_text_content(chunk.content)
+                if text:
+                    yield _sse_event("message", {"chunk": text})
 
             yield _sse_event("done", {"session_id": req.session_id})
 
@@ -524,7 +526,7 @@ async def deep_lens_analyze(req: DeepLensRequest):
                 rag_context=rag_context or "(참조 자료 없음)",
             )
             resp = await llm.ainvoke([HumanMessage(content=prompt)])
-            raw_content = resp.content
+            raw_content = _extract_text_content(resp.content)
         except Exception as e:
             logger.error(f"DeepLens LLM call failed for {req.verse_ref}: {e}", exc_info=True)
             raise HTTPException(
@@ -644,7 +646,7 @@ async def classify_report(req: ReportClassifyRequest):
         msg = await llm.ainvoke([HumanMessage(content=prompt)])
 
         # Parse JSON from markdown block if necessary
-        content = msg.content
+        content = _extract_text_content(msg.content)
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0].strip()
         elif "```" in content:

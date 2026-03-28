@@ -47,8 +47,24 @@ def _get_llm(temperature: float = 0.7) -> ChatGoogleGenerativeAI:
     )
 
 
+def _extract_text_content(content) -> str:
+    """LLM 응답의 content를 문자열로 변환 (Gemini multipart 대응)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and "text" in part:
+                parts.append(part["text"])
+        return "\n".join(parts)
+    return str(content)
+
+
 def _parse_json_response(text: str) -> dict:
     """Parse JSON from LLM response (handles markdown code blocks)."""
+    text = _extract_text_content(text)
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
@@ -306,7 +322,7 @@ async def counselor_node(state: MeditationState) -> dict:
         SystemMessage(content=system),
         *conversation_messages,
     ])
-    ai_response = resp.content
+    ai_response = _extract_text_content(resp.content)
 
     thinking = ThinkingEntry(
         node="counselor",
