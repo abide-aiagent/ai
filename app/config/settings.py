@@ -18,9 +18,9 @@ class Settings(BaseSettings):
     gemini_api_key: str = os.getenv("GEMINI_API_KEY")
 
     # Models
-    llm_model: str = "gemini-2.5-flash"
-    embedding_model: str = "models/text-embedding-004"
-    embedding_dimensions: int = 768
+    llm_model: str = "gemini-3.1-flash-lite-preview"
+    embedding_model: str = "models/gemini-embedding-001"
+    embedding_dimensions: int = 3072
 
     # Server
     ai_server_port: int = 8000

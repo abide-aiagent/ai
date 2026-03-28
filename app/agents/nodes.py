@@ -180,8 +180,6 @@ async def supervisor_node(state: MeditationState) -> dict:
         next_step, reasoning = "planner", "새 묵상 — 전략 수립"
     elif current_next_step == "verse_finder":
         next_step, reasoning = "verse_finder", "구절 탐색 계속"
-    elif end_confirmed:
-        next_step, reasoning = "scribe", "종료 확정 — 노트 작성"
     elif user_wants_end and depth < 90:
         next_step = "confirm_end"
         reasoning = f"종료 요청 but depth={depth} → 재확인"
@@ -321,6 +319,7 @@ async def counselor_node(state: MeditationState) -> dict:
         "messages": [AIMessage(content=ai_response)],
         "turn_count": turn_count + 1,
         "thinking_log": [thinking],
+        "last_executed_node": "counselor",
     }
 
 
@@ -356,7 +355,6 @@ async def observer_node(state: MeditationState) -> dict:
 
     return {
         "meditation_depth": new_depth,
-        "next_step": "counselor",
         "thinking_log": [thinking],
     }
 
@@ -384,6 +382,7 @@ async def scribe_node(state: MeditationState) -> dict:
             "messages": [AIMessage(content=closing)],
             "meditation_note": {"title": "오늘의 묵상", "skipped": True},
             "thinking_log": [thinking],
+            "last_executed_node": "scribe",
         }
 
     llm = _get_llm(temperature=0.7)
@@ -429,6 +428,7 @@ async def scribe_node(state: MeditationState) -> dict:
         "messages": [AIMessage(content=closing)],
         "meditation_note": note,
         "thinking_log": [thinking],
+        "last_executed_node": "scribe",
     }
 
 

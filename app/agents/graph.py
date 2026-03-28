@@ -6,7 +6,7 @@ Meditation Agent LangGraph Graph Definition
 Graph flow:
   START → supervisor → {planner | observer | confirm_end | wrap_up | scribe}
   planner → counselor → END
-  observer → {counselor | wrap_up}
+  observer → counselor
   confirm_end → END  (awaits user response → supervisor decides in next turn)
   wrap_up → END      (awaits user response → supervisor routes to scribe)
   counselor → END
@@ -49,11 +49,6 @@ def route_from_supervisor(state: MeditationState) -> Literal["planner", "observe
     return state.get("next_step", "planner")
 
 
-def route_from_observer(state: MeditationState) -> Literal["counselor", "wrap_up"]:
-    """Continue conversation or wrap up based on Observer's evaluation"""
-    return state.get("next_step", "counselor")
-
-
 # ──────────────────────────────────────────────
 # Graph build
 # ──────────────────────────────────────────────
@@ -91,14 +86,7 @@ def build_meditation_graph() -> StateGraph:
     graph.add_edge("planner", "counselor")
     graph.add_edge("counselor", END)
 
-    graph.add_conditional_edges(
-        "observer",
-        route_from_observer,
-        {
-            "counselor": "counselor",
-            "wrap_up": "wrap_up",
-        },
-    )
+    graph.add_edge("observer", "counselor")
 
     graph.add_edge("scribe", END)
     graph.add_edge("confirm_end", END)
@@ -239,8 +227,9 @@ async def continue_meditation(
     return _extract_response(result, session_state.get("scripture_text", ""))
 
 
-# 사용자에게 직접 보이는 응답을 생성하는 노드 — 이 노드의 LLM 토큰만 스트리밍
-_STREAMING_NODES = frozenset({"counselor", "wrap_up", "confirm_end"})
+# 사용자에게 직접 보이는 응답을 LLM으로 생성하는 노드 — 이 노드의 LLM 토큰만 스트리밍
+# wrap_up/confirm_end는 LLM 미사용(템플릿 AIMessage) → was_streamed=False로 별도 처리
+_STREAMING_NODES = frozenset({"counselor", "scribe"})
 
 
 async def start_meditation_streaming(
@@ -255,8 +244,8 @@ async def start_meditation_streaming(
 ) -> AsyncGenerator[dict, None]:
     """
     start_meditation의 스트리밍 버전.
-    {"type": "token", "content": "..."} — counselor/wrap_up/confirm_end의 LLM 토큰
-    {"type": "result", "data": {...}}   — 그래프 완료 후 최종 결과
+    {"type": "token", "content": "..."} — counselor/scribe의 LLM 토큰
+    {"type": "result", "data": {...}}   — 그래프 완료 후 최종 결과 (was_streamed 플래그 포함)
     """
     if session_type == "verse_finder" or (not verse_ref and initial_query):
         initial_state = create_initial_state(
@@ -287,17 +276,19 @@ async def start_meditation_streaming(
         )
 
     final_output: MeditationState | None = None
+    has_streamed = False
 
     async for event in meditation_graph.astream_events(initial_state, version="v2"):
         kind = event["event"]
 
-        # counselor/wrap_up/confirm_end 노드의 LLM 토큰 → 즉시 스트리밍
+        # counselor/scribe 노드의 LLM 토큰 → 즉시 스트리밍
         if kind == "on_chat_model_stream":
             node = event.get("metadata", {}).get("langgraph_node", "")
             if node in _STREAMING_NODES:
                 chunk = event["data"]["chunk"]
                 content = getattr(chunk, "content", "")
                 if content:
+                    has_streamed = True
                     yield {"type": "token", "content": content}
 
         # 그래프 전체 완료 — 최종 상태 캡처
@@ -305,7 +296,9 @@ async def start_meditation_streaming(
             final_output = event["data"].get("output")
 
     if final_output is not None:
-        yield {"type": "result", "data": _extract_response(final_output, scripture_text)}
+        resp = _extract_response(final_output, scripture_text)
+        resp["was_streamed"] = has_streamed
+        yield {"type": "result", "data": resp}
 
 
 async def continue_meditation_streaming(
@@ -324,6 +317,7 @@ async def continue_meditation_streaming(
 
     scripture_text = session_state.get("scripture_text", "")
     final_output: MeditationState | None = None
+    has_streamed = False
 
     async for event in meditation_graph.astream_events(updated_state, version="v2"):
         kind = event["event"]
@@ -334,13 +328,16 @@ async def continue_meditation_streaming(
                 chunk = event["data"]["chunk"]
                 content = getattr(chunk, "content", "")
                 if content:
+                    has_streamed = True
                     yield {"type": "token", "content": content}
 
         elif kind == "on_chain_end" and event.get("name") == "LangGraph":
             final_output = event["data"].get("output")
 
     if final_output is not None:
-        yield {"type": "result", "data": _extract_response(final_output, scripture_text)}
+        resp = _extract_response(final_output, scripture_text)
+        resp["was_streamed"] = has_streamed
+        yield {"type": "result", "data": resp}
 
 
 def _extract_response(result: MeditationState, scripture_text: str) -> dict[str, Any]:
@@ -363,4 +360,5 @@ def _extract_response(result: MeditationState, scripture_text: str) -> dict[str,
         "is_final": result.get("meditation_note") is not None,
         "state": dict(result),
         "scripture_text": scripture_text,
+        "was_streamed": False,
     }

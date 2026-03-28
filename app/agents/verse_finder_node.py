@@ -142,6 +142,7 @@ async def verse_finder_node(state: MeditationState) -> dict:
             "scripture_text": scripture_text,  # ← Planner가 RAG/묵상 가이드에 사용
             "next_step": "planner",
             "messages": [AIMessage(content=f"'{last_human}'에서 구절을 찾았어요. 지금 바로 묵상을 시작할게요!")],
+            "last_executed_node": "verse_finder",
         }
 
     # 2단계: 구절을 못 찾으면 LLM으로 상황 파악/추천
@@ -189,6 +190,8 @@ async def verse_finder_node(state: MeditationState) -> dict:
         return {
             "next_step": "verse_finder",  # 아직 구절 미결정, 계속 대기
             "messages": [AIMessage(content=response.content)],
+            "last_executed_node": "verse_finder",
+            "turn_count": state.get("turn_count", 0) + 1,
         }
     except Exception as e:
         # LLM 호출 실패 시 세션 크래시 방지 — 사용자에게 재시도 유도
@@ -199,4 +202,6 @@ async def verse_finder_node(state: MeditationState) -> dict:
                 content="죄송합니다, 잠시 오류가 발생했어요. "
                         "묵상하고 싶은 구절을 다시 말씀해 주시겠어요?"
             )],
+            "last_executed_node": "verse_finder",
+            "turn_count": state.get("turn_count", 0) + 1,
         }

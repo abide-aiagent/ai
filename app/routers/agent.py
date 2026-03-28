@@ -187,7 +187,7 @@ async def meditation_start(req: MeditationStartRequest):
 
             result: dict | None = None
 
-            # 토큰 단위 스트리밍 — counselor/wrap_up/confirm_end 노드의 LLM 출력을 즉시 전달
+            # 토큰 단위 스트리밍 — counselor/scribe 노드의 LLM 출력을 즉시 전달
             async for item in start_meditation_streaming(
                 user_id=req.user_id,
                 session_id=req.session_id,
@@ -206,6 +206,10 @@ async def meditation_start(req: MeditationStartRequest):
                 yield _sse_event("error", {"message": "묵상 응답을 생성하지 못했습니다."})
                 return
 
+            # 비스트리밍 노드(confirm_end, wrap_up 등)의 응답을 전체 텍스트로 전송
+            if not result.get("was_streamed") and result.get("content"):
+                yield _sse_event("message", {"content": result["content"]})
+
             # Save session state (Redis)
             await _save_state(req.session_id, result["state"])
 
@@ -218,6 +222,20 @@ async def meditation_start(req: MeditationStartRequest):
                 yield _sse_event("verse_highlight", verse)
 
             elapsed = int((time.time() - start_time) * 1000)
+
+            # DB 저장 (done 이벤트 전에 완료)
+            await save_ai_message(
+                session_id=req.session_id,
+                role="assistant",
+                content=result["content"],
+                referenced_verses=result.get("referenced_verses"),
+                latency_ms=elapsed,
+            )
+
+            if result.get("meditation_note"):
+                await save_meditation_note(req.session_id, result["meditation_note"])
+
+            # done 이벤트 (DB 저장 완료 후)
             yield _sse_event(
                 "done",
                 {
@@ -227,19 +245,6 @@ async def meditation_start(req: MeditationStartRequest):
                     "latency_ms": elapsed,
                 },
             )
-
-            # Save AI message to DB
-            await save_ai_message(
-                session_id=req.session_id,
-                role="assistant",
-                content=result["content"],
-                referenced_verses=result.get("referenced_verses"),
-                latency_ms=elapsed,
-            )
-
-            # Save meditation note to DB if generated
-            if result.get("meditation_note"):
-                await save_meditation_note(req.session_id, result["meditation_note"])
 
         except Exception as e:
             logger.error(f"Meditation start error: {e}", exc_info=True)
@@ -274,7 +279,7 @@ async def meditation_chat(req: MeditationChatRequest):
 
             result: dict | None = None
 
-            # 토큰 단위 스트리밍
+            # 토큰 단위 스트리밍 — counselor/scribe 노드의 LLM 출력을 즉시 전달
             async for item in continue_meditation_streaming(
                 session_state=session_state,
                 user_message=req.user_message,
@@ -287,6 +292,10 @@ async def meditation_chat(req: MeditationChatRequest):
             if result is None:
                 yield _sse_event("error", {"message": "묵상 응답을 생성하지 못했습니다."})
                 return
+
+            # 비스트리밍 노드(confirm_end, wrap_up 등)의 응답을 전체 텍스트로 전송
+            if not result.get("was_streamed") and result.get("content"):
+                yield _sse_event("message", {"content": result["content"]})
 
             # Update session state (Redis)
             await _save_state(req.session_id, result["state"])
@@ -301,21 +310,7 @@ async def meditation_chat(req: MeditationChatRequest):
 
             elapsed = int((time.time() - start_time) * 1000)
 
-            done_data = {
-                "session_id": req.session_id,
-                "meditation_depth": result["meditation_depth"],
-                "turn_count": result["turn_count"],
-                "is_final": result["is_final"],
-                "latency_ms": elapsed,
-            }
-
-            # Include meditation note if generated
-            if result.get("meditation_note"):
-                done_data["meditation_note"] = result["meditation_note"]
-
-            yield _sse_event("done", done_data)
-
-            # Save AI message to DB
+            # DB 저장 (done 이벤트 전에 완료)
             await save_ai_message(
                 session_id=req.session_id,
                 role="assistant",
@@ -324,11 +319,21 @@ async def meditation_chat(req: MeditationChatRequest):
                 latency_ms=elapsed,
             )
 
-            # Save meditation note to DB if generated
             if result.get("meditation_note"):
                 await save_meditation_note(req.session_id, result["meditation_note"])
 
-            # Clean up session state on meditation completion
+            done_data = {
+                "session_id": req.session_id,
+                "meditation_depth": result["meditation_depth"],
+                "turn_count": result["turn_count"],
+                "is_final": result["is_final"],
+                "latency_ms": elapsed,
+            }
+            if result.get("meditation_note"):
+                done_data["meditation_note"] = result["meditation_note"]
+
+            yield _sse_event("done", done_data)
+
             if result["is_final"]:
                 await _remove_state(req.session_id)
 
